@@ -9,9 +9,10 @@ from datetime import datetime, timedelta
 import yaml
 from typing import List, Dict, Literal
 import neurokit2 as nk
+from logger_setup import setup_logger
 
 config = yaml.safe_load(open("config.yaml"))
-
+logger = setup_logger()
 
 def get_matching_files(directory, pattern) -> List[str]:
     """
@@ -36,7 +37,7 @@ def extract_ecg_zip(zip_file, extract_dir=None) -> bool:
             zip_ref.extractall(extract_dir)
         return True
     except Exception as e:
-        print(f'Error extracting {zip_file}: {e}')
+        logger.error(f'Error extracting {zip_file}: {e}')
         return False
 
 def get_holter_start_time(ecg_holter) -> datetime:
@@ -107,7 +108,10 @@ def get_time_interval_holters(directory: str, interval_start: datetime, interval
 
 def get_time_interval_files(directory: str, pattern: str, interval_start: datetime, interval_end: datetime) -> List[Dict[str, str | datetime | timedelta]]:
     """
-        
+        Get all files in the directory that match the pattern and contain data within the time interval.
+        Returns a list of dicts that contain the filename, 
+        the start and end times of the the subset of the interval that is within the file,
+        and the indices of the start and end of the subset of the interval that is within the file.
     """
     fpaths = get_matching_files(directory=directory, pattern=pattern)
     interval_files = []
@@ -117,7 +121,7 @@ def get_time_interval_files(directory: str, pattern: str, interval_start: dateti
             start_time = datetime.strptime(f.split('_')[3] + f.split('_')[4], '%Y%m%d%H%M%S')
             end_time = datetime.strptime(f.split('_')[5] + f.split('_')[6], '%Y%m%d%H%M%S')
         except ValueError:
-            print(f"Error parsing start and end times for {f}")
+            logger.error(f"Error parsing start and end times for {f}")
             continue
         if start_time < interval_end and end_time > interval_start:
             start_time = max(start_time, interval_start)
