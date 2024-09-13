@@ -1,0 +1,3 @@
+ecg_hz: 128
+powerline_hz: 60
+epoch_seconds: 30
