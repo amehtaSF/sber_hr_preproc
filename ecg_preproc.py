@@ -9,10 +9,13 @@ from datetime import datetime, timedelta
 import yaml
 from typing import List, Dict, Literal
 import neurokit2 as nk
+import logging
 from logger_setup import setup_logger
 
 config = yaml.safe_load(open("config.yaml"))
-logger = setup_logger()
+# logger = setup_logger()
+logger = logging.getLogger(__name__)
+
 
 def get_matching_files(directory, pattern) -> List[str]:
     """
@@ -85,57 +88,131 @@ def get_holter_time_metadata(directory) -> List[Dict[str, str | datetime | timed
                           'duration': duration})
     return times
 
-def get_time_interval_holters(directory: str, interval_start: datetime, interval_end: datetime) -> List[Dict[str, str | datetime | timedelta]]:
-    """
-    Get all holter files in the directory that contain data within the time interval.
-    Returns a list of dicts that contain the filename and 
-    the start and end times of the the subset of the interval that is within the file.
-    """
-    dir_metadatas = get_holter_time_metadata(directory)
-    interval_files = []
-    for file in dir_metadatas:
-        if file['start_time'] < interval_end and file['end_time'] > interval_start:
-            start_time = max(file['start_time'], interval_start)
-            end_time = min(file['end_time'], interval_end)
-            interval_files.append({
-                'dir': file['dir'],
-                'filename': file['filename'],
-                'start_time': start_time,
-                'end_time': end_time,
-                'duration': end_time - start_time
-            })
-    return interval_files
 
-def get_time_interval_files(directory: str, pattern: str, interval_start: datetime, interval_end: datetime) -> List[Dict[str, str | datetime | timedelta]]:
+def get_file_rows_in_interval(file_start: datetime, file_end: datetime, interval_start: datetime, interval_end: datetime):
     """
-        Get all files in the directory that match the pattern and contain data within the time interval.
-        Returns a list of dicts that contain the filename, 
-        the start and end times of the the subset of the interval that is within the file,
-        and the indices of the start and end of the subset of the interval that is within the file.
+    Given a file with start and end times, and an interval with start and end times,
+    return the start and end times and indices of the subset of the interval that is within the file.
+    This should be fast enough to run on all files for a participant without screening for relevant files.
     """
-    fpaths = get_matching_files(directory=directory, pattern=pattern)
-    interval_files = []
-    for fpath in fpaths:
-        f = os.path.basename(fpath)
-        try:
-            start_time = datetime.strptime(f.split('_')[3] + f.split('_')[4], '%Y%m%d%H%M%S')
-            end_time = datetime.strptime(f.split('_')[5] + f.split('_')[6], '%Y%m%d%H%M%S')
-        except ValueError:
-            logger.error(f"Error parsing start and end times for {f}")
-            continue
-        if start_time < interval_end and end_time > interval_start:
-            start_time = max(start_time, interval_start)
-            end_time = min(end_time, interval_end)
-            interval_files.append({
-                'dir': directory,
-                'filename': f,
-                'start_time': start_time,
-                'end_time': end_time,
-                'duration': end_time - start_time
-            })
+    assert file_start < file_end, "File start time must be before file end time."
+    assert interval_start < interval_end, "Interval start time must be before interval end time."
+    file_rows = int((file_end - file_start).total_seconds() * config['ecg_hz'])  # could be off slightly (less than one second)
+        
+    valid_file = False
+    
+    if file_start >= interval_start and file_start < interval_end:
+        # file starts within interval
+        valid_file = True
+    elif file_end > interval_start and file_end <= interval_end:
+        # file ends within interval
+        valid_file = True
+    elif file_start <= interval_start and file_end >= interval_end:
+        # file contains entire interval
+        valid_file = True
+    else:
+        valid_file = False
+        
+    if valid_file:
+        start_time = max(file_start, interval_start)
+        end_time = min(file_end, interval_end)
+        start_idx = max(int((interval_start - file_start).total_seconds() * config['ecg_hz']), 0)
+        end_idx = min(int((interval_end - file_start).total_seconds() * config['ecg_hz']), file_rows)
+    else:
+        # start_time = end_time = start_idx = end_idx = None
+        return False
+    
+    return {
+        'start_time': start_time,
+        'end_time': end_time,
+        'start_idx': start_idx,
+        'end_idx': end_idx
+    }
     
 
+# def get_time_interval_files(directory: str, pattern: str, interval_start: datetime, interval_end: datetime) -> List[Dict[str, str | datetime | timedelta]]:
+#     """
+#         Get all files in the directory that match the pattern and contain data within the time interval.
+#         Returns a list of dicts that contain the filename, 
+#         the start and end times of the the subset of the interval that is within the file,
+#         and the indices of the start and end of the subset of the interval that is within the file.
+#     """
+#     fpaths = get_matching_files(directory=directory, pattern=pattern)
+#     interval_files = []
+#     for fpath in fpaths:
+#         f = os.path.basename(fpath)
+#         try:
+#             file_start = get_filename_start_ts(f)
+#             file_end = get_filename_end_ts(f)
+#         except ValueError:
+#             logger.error(f"Error parsing start and end times for {f}")
+#             continue
+        
+#         f_times = get_file_rows_in_interval(file_start, file_end, interval_start, interval_end)
+#         if not f_times:
+#             # file does not overlap interval, skip
+#             continue
+#         interval_files.append({
+#             'filename': f,
+#             'filepath': fpath,
+#             'start_time': f_times['start_time'],
+#             'end_time': f_times['end_time'],
+#             'start_idx': f_times['start_idx'],
+#             'end_idx': f_times['end_idx']
+#         })
+        
+def stitch_files():
+    pass
 
+def valid_filename(filename: str, datatype: Literal['meta', 'qrs', 'rpeaks', 'phase']=None) -> bool:
+    """
+    Check if the filename is a valid ECG filename. 
+    It's a bit weird because I'm trying to avoid using regex for speed.
+    """
+    filename = os.path.basename(filename)
+    filename = os.path.splitext(filename)[0]
+    f_split = filename.split('_')
+    # check filename
+    if len(f_split) < 7:
+        return False
+    if f_split[0] != 'ECG':
+        return False
+    if len(f_split[3]) != 8 or len(f_split[4]) != 6 or len(f_split[5]) != 8 or len(f_split[6]) != 6:
+        return False
+    # specific datatype
+    if datatype:
+        if f_split[2] != datatype:
+            return False
+    return True
+
+
+def get_filename_start_ts(filename: str) -> datetime:
+    """
+    Get the start time from a filename.
+    """
+    try:
+        filename = os.path.basename(filename)
+        filename = os.path.splitext(filename)[0]
+        f_split = filename.split('_')
+        start_ts = datetime.strptime(f_split[3] + f_split[4], '%Y%m%d%H%M%S')
+    except ValueError:
+        logger.error(f"Error parsing start time for {filename}")
+        return None
+    return start_ts
+
+def get_filename_end_ts(filename: str) -> datetime:
+    """
+    Get the end time from a filename.
+    """
+    try:
+        filename = os.path.basename(filename)
+        filename = os.path.splitext(filename)[0]
+        f_split = filename.split('_')
+        end_ts = datetime.strptime(f_split[5] + f_split[6], '%Y%m%d%H%M%S')
+    except ValueError:
+        logger.error(f"Error parsing end time for {filename}")
+        return None
+    return end_ts
 
 
 class ECGProcessor:
@@ -156,8 +233,10 @@ class ECGProcessor:
         if ecg_signal is None or len(ecg_signal) == 0:
             raise ValueError(f"ECG signal is empty for {pid} from {start_time} to {end_time}")
         
-        if len(ecg_signal) != (end_time - start_time).seconds * self.fs:
+        if len(ecg_signal) != (end_time - start_time).total_seconds() * self.fs:
             raise ValueError(f"ECG signal length ({len(ecg_signal)}) does not match time interval for {pid} from {start_time} to {end_time}")
+        
+        logger.debug(f"ECGProcessor initialized for {pid} from {start_time} to {end_time}")
         
     
     def clean(self, ecg):
@@ -227,6 +306,11 @@ class ECGProcessor:
         Filename format: ECG_{filetype}_{pid}_{start_time}_{end_time}_{pr_excellent}_{pr_acceptable}_{pr_unacceptable}.csv
         """
         
+        # If output_dir doesn't exist, make it
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            logger.info(f"Created directory {output_dir}")
+                
         # Clean signal (highpass and notch filter)
         ecg = self.clean(self.ecg_raw)
         ecg = ecg.astype(np.float32)
@@ -235,11 +319,15 @@ class ECGProcessor:
         epoch_idx = np.arange(0, len(ecg), self.fs*config['epoch_seconds'], dtype=np.int32)
         epoch_arr = np.repeat(np.arange(len(epoch_idx), dtype=np.int16), self.fs*config['epoch_seconds'])[:len(ecg)]
         
-        # Detect R-peaks
+        # Detect R-peaks and HR
         # df_rpeaks, rpeaks = nk.ecg_peaks(ecg, sampling_rate=self.fs, method='emrich2023') # originally wanted this, but got an error on one file randomly
-        df_rpeaks, rpeaks = nk.ecg_peaks(ecg, sampling_rate=self.fs, method='rodrigues2021')
+        # df_rpeaks, rpeaks = nk.ecg_peaks(ecg, sampling_rate=self.fs, method='rodrigues2021')
+        df_rpeaks, rpeaks = nk.ecg_peaks(ecg, sampling_rate=self.fs, method='neurokit')
         df_rpeaks['ECG_R_Peaks'] = df_rpeaks['ECG_R_Peaks'].astype(np.int8)
+        hr = nk.ecg_rate(rpeaks, sampling_rate=self.fs, desired_length=len(ecg), interpolation_method='monotone_cubic')
+        df_rpeaks['HR'] = hr.astype(np.float32)
         rpeaks = rpeaks['ECG_R_Peaks']
+        
         
         # Get Zhao 2018 quality ratings
         quality_arr = np.full(len(ecg), -1, dtype=np.int8)

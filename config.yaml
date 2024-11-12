@@ -1,3 +1,7 @@
 ecg_hz: 128
 powerline_hz: 60
-epoch_seconds: 30
+epoch_seconds: 15
+filename_start_date_idx: 3
+filename_start_time_idx: 4
+filename_end_date_idx: 5
+filename_end_time_idx: 6
